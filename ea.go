@@ -52,10 +52,6 @@ func Batch(cmds ...Cmd) Cmd {
 
 // Loop runs a update loop.
 type Loop[M Model[M]] struct {
-	// If not nil, PostUpdate is called synchronously with the new Model
-	// after every update.
-	PostUpdate func(M)
-
 	m    M
 	msgs chan Msg
 }
@@ -112,9 +108,6 @@ func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) M {
 				loop.m = m
 				if cmd != nil {
 					go loop.do(ctx, cmd)
-				}
-				if loop.PostUpdate != nil {
-					loop.PostUpdate(loop.m)
 				}
 			}
 		}
