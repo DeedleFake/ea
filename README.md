@@ -24,17 +24,25 @@ type Model interface {
 	View() string
 }
 
+type model struct {
+	m Model
+}
+
+func (m model) Update(msg ea.Msg) (model, ea.Cmd) {
+	next, cmd := m.m.Update(msg)
+	m.m = next
+	fmt.Println(m.m.View())
+	return m, cmd
+}
+
 type Program struct {
 	loop *ea.Loop
 }
 
 func New(initialModel Model) *Program {
-	p := &Program{
+	return &Program{
 		loop: ea.New(initialModel),
 	}
-	p.loop.PostUpdate = p.view
-
-	return p
 }
 
 func (p *Program) view(model Model) {
