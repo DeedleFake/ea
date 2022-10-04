@@ -52,6 +52,10 @@ func Batch(cmds ...Cmd) Cmd {
 
 // Loop runs a update loop.
 type Loop[M Model[M]] struct {
+	// If not nil, PostUpdate is called synchronously with the new Model
+	// after every update.
+	PostUpdate func(M)
+
 	m    M
 	msgs chan Msg
 }
@@ -78,7 +82,9 @@ func (loop *Loop[M]) do(ctx context.Context, cmd Cmd) {
 
 // Run runs the Loop with an optional initial command. It blocks until
 // the loop exits, returning the final Model.
-func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) Model[M] {
+//
+// Behavior is undefined if two calls to Run happen concorrently.
+func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) M {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -106,6 +112,9 @@ func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) Model[M] {
 				loop.m = m
 				if cmd != nil {
 					go loop.do(ctx, cmd)
+				}
+				if loop.PostUpdate != nil {
+					loop.PostUpdate(loop.m)
 				}
 			}
 		}
