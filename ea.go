@@ -2,8 +2,9 @@ package ea
 
 import (
 	"context"
+	"sync"
 
-	"deedles.dev/mk"
+	"deedles.dev/xsync/cq"
 )
 
 // Model is a state that is capable of producing a new state from
@@ -52,35 +53,35 @@ func Batch(cmds ...Cmd) Cmd {
 
 // Loop runs a update loop.
 type Loop[M Model[M]] struct {
-	m    M
-	msgs chan Msg
+	done  chan struct{}
+	close sync.Once
+	msgs  *cq.BulkQueue[Msg, []Msg]
+	m     M
 }
 
 // New returns a Loop with an initial Model.
 func New[M Model[M]](model M) *Loop[M] {
 	loop := &Loop[M]{
-		m: model,
+		m:    model,
+		done: make(chan struct{}),
+		msgs: cq.Simple[Msg](),
 	}
-	mk.Chan(&loop.msgs, 0)
 
 	return loop
 }
 
 // do runs a Cmd, sending the result back into the Loop.
 func (loop *Loop[M]) do(ctx context.Context, cmd Cmd) {
-	msg := cmd()
-
-	select {
-	case <-ctx.Done():
-	case loop.msgs <- msg:
-	}
+	loop.Enqueue(cmd())
 }
 
 // Run runs the Loop with an optional initial command. It blocks until
 // the loop exits, returning the final Model.
 //
-// Behavior is undefined if two calls to Run happen concorrently.
+// Behavior is undefined if Run is called more than once.
 func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) M {
+	defer loop.close.Do(func() { close(loop.done) })
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -93,29 +94,38 @@ func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) M {
 		case <-ctx.Done():
 			return loop.m
 
-		case msg := <-loop.msgs:
-			switch msg := msg.(type) {
-			case quitMsg:
+		case msgs, ok := <-loop.msgs.Get():
+			if !ok {
 				return loop.m
+			}
 
-			case batchMsg:
-				for _, cmd := range msg {
-					go loop.do(ctx, cmd)
-				}
+			for _, msg := range msgs {
+				switch msg := msg.(type) {
+				case quitMsg:
+					return loop.m
 
-			default:
-				m, cmd := loop.m.Update(msg)
-				loop.m = m
-				if cmd != nil {
-					go loop.do(ctx, cmd)
+				case batchMsg:
+					for _, cmd := range msg {
+						go loop.do(ctx, cmd)
+					}
+
+				default:
+					m, cmd := loop.m.Update(msg)
+					loop.m = m
+					if cmd != nil {
+						go loop.do(ctx, cmd)
+					}
 				}
 			}
 		}
 	}
 }
 
-// Send returns a channel which can be used to send Msgs to a running
-// Loop. Doing so will trigger an update.
-func (loop *Loop[M]) Send() chan<- Msg {
-	return loop.msgs
+// Enqueue adds msg to the Loop's internal queue of messages to be
+// handled.
+func (loop *Loop[M]) Enqueue(msg Msg) {
+	select {
+	case <-loop.done:
+	case loop.msgs.Add() <- msg:
+	}
 }
