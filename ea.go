@@ -55,7 +55,7 @@ func Batch(cmds ...Cmd) Cmd {
 type Loop[M Model[M]] struct {
 	done  chan struct{}
 	close sync.Once
-	msgs  *cq.BulkQueue[Msg, []Msg]
+	msgs  cq.Queue[Msg]
 	m     M
 }
 
@@ -64,7 +64,6 @@ func New[M Model[M]](model M) *Loop[M] {
 	loop := &Loop[M]{
 		m:    model,
 		done: make(chan struct{}),
-		msgs: cq.Simple[Msg](),
 	}
 
 	return loop
@@ -94,27 +93,25 @@ func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) M {
 		case <-ctx.Done():
 			return loop.m
 
-		case msgs, ok := <-loop.msgs.Get():
+		case msg, ok := <-loop.msgs.Get():
 			if !ok {
 				return loop.m
 			}
 
-			for _, msg := range msgs {
-				switch msg := msg.(type) {
-				case quitMsg:
-					return loop.m
+			switch msg := msg.(type) {
+			case quitMsg:
+				return loop.m
 
-				case batchMsg:
-					for _, cmd := range msg {
-						go loop.do(ctx, cmd)
-					}
+			case batchMsg:
+				for _, cmd := range msg {
+					go loop.do(ctx, cmd)
+				}
 
-				default:
-					m, cmd := loop.m.Update(msg)
-					loop.m = m
-					if cmd != nil {
-						go loop.do(ctx, cmd)
-					}
+			default:
+				m, cmd := loop.m.Update(msg)
+				loop.m = m
+				if cmd != nil {
+					go loop.do(ctx, cmd)
 				}
 			}
 		}
