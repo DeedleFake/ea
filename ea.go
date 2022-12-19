@@ -2,9 +2,8 @@ package ea
 
 import (
 	"context"
-	"sync"
 
-	"deedles.dev/xsync/cq"
+	"deedles.dev/xsync"
 )
 
 // Model is a state that is capable of producing a new state from
@@ -53,17 +52,15 @@ func Batch(cmds ...Cmd) Cmd {
 
 // Loop runs a update loop.
 type Loop[M Model[M]] struct {
-	done  chan struct{}
-	close sync.Once
-	msgs  cq.Queue[Msg]
-	m     M
+	stop xsync.Stopper
+	msgs xsync.Queue[Msg]
+	m    M
 }
 
 // New returns a Loop with an initial Model.
 func New[M Model[M]](model M) *Loop[M] {
 	loop := &Loop[M]{
-		m:    model,
-		done: make(chan struct{}),
+		m: model,
 	}
 
 	return loop
@@ -79,7 +76,7 @@ func (loop *Loop[M]) do(ctx context.Context, cmd Cmd) {
 //
 // Behavior is undefined if Run is called more than once.
 func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) M {
-	defer loop.close.Do(func() { close(loop.done) })
+	defer loop.stop.Stop()
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -122,7 +119,7 @@ func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) M {
 // handled.
 func (loop *Loop[M]) Enqueue(msg Msg) {
 	select {
-	case <-loop.done:
+	case <-loop.stop.Done():
 	case loop.msgs.Add() <- msg:
 	}
 }
