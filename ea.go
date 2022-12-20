@@ -52,64 +52,61 @@ func Batch(cmds ...Cmd) Cmd {
 
 // Loop runs a update loop.
 type Loop[M Model[M]] struct {
-	stop xsync.Stopper
-	msgs xsync.Queue[Msg]
-	m    M
+	stop  xsync.Stopper
+	queue xsync.Queue[func()]
+	m     M
 }
 
-// New returns a Loop with an initial Model.
-func New[M Model[M]](model M) *Loop[M] {
-	loop := &Loop[M]{
-		m: model,
+func New[M Model[M]](initialModel M) *Loop[M] {
+	return &Loop[M]{
+		m: initialModel,
 	}
+}
 
-	return loop
+// Model returns the current model that will be used to perform the
+// next update. If the loop has stopped, it will return the final
+// model.
+func (loop *Loop[M]) Model() M {
+	return loop.m
+}
+
+// Stop stops the loop. This should be called when the loop is no
+// longer going to be used.
+func (loop *Loop[M]) Stop() {
+	loop.stop.Stop()
+	loop.queue.Stop()
 }
 
 // do runs a Cmd, sending the result back into the Loop.
-func (loop *Loop[M]) do(ctx context.Context, cmd Cmd) {
+func (loop *Loop[M]) do(cmd Cmd) {
 	loop.Enqueue(cmd())
 }
 
-// Run runs the Loop with an optional initial command. It blocks until
-// the loop exits, returning the final Model.
+// Updates yields functions that perform successive updates to the
+// model. Calling these functions in a different order than how they
+// are received will result in undefined behavior.
 //
-// Behavior is undefined if Run is called more than once.
-func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) M {
-	defer loop.stop.Stop()
+// This channel will be closed when the loop is stopped.
+func (loop *Loop[M]) Updates() <-chan func() {
+	return loop.queue.Get()
+}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+func (loop *Loop[M]) update(msg Msg) func() {
+	return func() {
+		switch msg := msg.(type) {
+		case quitMsg:
+			loop.Stop()
 
-	if cmd != nil {
-		go loop.do(ctx, cmd)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return loop.m
-
-		case msg, ok := <-loop.msgs.Get():
-			if !ok {
-				return loop.m
+		case batchMsg:
+			for _, cmd := range msg {
+				go loop.do(cmd)
 			}
 
-			switch msg := msg.(type) {
-			case quitMsg:
-				return loop.m
-
-			case batchMsg:
-				for _, cmd := range msg {
-					go loop.do(ctx, cmd)
-				}
-
-			default:
-				m, cmd := loop.m.Update(msg)
-				loop.m = m
-				if cmd != nil {
-					go loop.do(ctx, cmd)
-				}
+		default:
+			m, cmd := loop.m.Update(msg)
+			loop.m = m
+			if cmd != nil {
+				go loop.do(cmd)
 			}
 		}
 	}
@@ -120,6 +117,26 @@ func (loop *Loop[M]) Run(ctx context.Context, cmd Cmd) M {
 func (loop *Loop[M]) Enqueue(msg Msg) {
 	select {
 	case <-loop.stop.Done():
-	case loop.msgs.Add() <- msg:
+	case loop.queue.Add() <- loop.update(msg):
+	}
+}
+
+// Run runs updates for loop until the loop is stopped or the context
+// is canceled. It returns the final model produced by the loop.
+func Run[M Model[M]](ctx context.Context, loop *Loop[M]) M {
+	defer loop.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return loop.Model()
+
+		case update, ok := <-loop.Updates():
+			if !ok {
+				return loop.Model()
+			}
+
+			update()
+		}
 	}
 }
